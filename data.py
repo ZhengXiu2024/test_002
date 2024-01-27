@@ -93,28 +93,28 @@ input_train_final.loc[last_index1 + pd.DateOffset(minutes=15)] = last_data1
 input_train_final.loc[last_index1 + pd.DateOffset(minutes=30)] = last_data1
 input_train_final.loc[last_index1 + pd.DateOffset(minutes=45)] = last_data1
 print(input_train_final)
-# 1h测试集插值
-new_index2 = pd.date_range(start=input_test.index.min(), end=input_test.index.max(), freq='15T')
-input_test_final1 = input_test.reindex(new_index2, method='ffill')
-last_index2 = new_index2[-1]
-last_data2 = input_test_final1.loc[last_index2]
-input_test_final1.loc[last_index2 + pd.DateOffset(minutes=15)] = last_data2
-input_test_final1.loc[last_index2 + pd.DateOffset(minutes=30)] = last_data2
-input_test_final1.loc[last_index2 + pd.DateOffset(minutes=45)] = last_data2
-print(input_test_final1)
+# # 1h测试集插值
+# new_index2 = pd.date_range(start=input_test.index.min(), end=input_test.index.max(), freq='15T')
+# input_test_final1 = input_test.reindex(new_index2, method='ffill')
+# last_index2 = new_index2[-1]
+# last_data2 = input_test_final1.loc[last_index2]
+# input_test_final1.loc[last_index2 + pd.DateOffset(minutes=15)] = last_data2
+# input_test_final1.loc[last_index2 + pd.DateOffset(minutes=30)] = last_data2
+# input_test_final1.loc[last_index2 + pd.DateOffset(minutes=45)] = last_data2
+# print(input_test_final1)
 
-# 15m测试集气象数据获取和处理
-res1 = client.sql("select ts,avg(dswrfsfc),avg(rh2m),avg(tmp2m),avg(ws100m) from w_15d_15min_latest where ts >= "
-                  "'2023-11-13 00:00:00.000' and ts < '2024-01-01 00:00:00.000' group by ts order by ts")
-# print(res)
-columns1 = [col[0] for col in res['column_meta']]
-df1 = pd.DataFrame(res1['data'], columns=columns1)
-print(df1)
-
-input_test_final1_reset = input_test_final1.reset_index(drop=True)
-last_column = input_test_final1_reset.iloc[:, -2]
-input_test_final = pd.concat([df1, last_column], axis=1)
-print(input_test_final)
+# # 15m测试集气象数据获取和处理
+# res1 = client.sql("select ts,avg(dswrfsfc),avg(rh2m),avg(tmp2m),avg(ws100m) from w_15d_15min_latest where ts >= "
+#                   "'2023-11-13 00:00:00.000' and ts < '2024-01-01 00:00:00.000' group by ts order by ts")
+# # print(res)
+# columns1 = [col[0] for col in res['column_meta']]
+# df1 = pd.DataFrame(res1['data'], columns=columns1)
+# print(df1)
+#
+# input_test_final1_reset = input_test_final1.reset_index(drop=True)
+# last_column = input_test_final1_reset.iloc[:, -2]
+# input_test_final = pd.concat([df1, last_column], axis=1)
+# print(input_test_final)
 
 # 负荷数据处理
 # def process_excel_file(file_path, idx):
@@ -201,8 +201,8 @@ def create_rolling_window_data(data, window_size, target_size):
     return np.array(X), np.array(y)
 
 
-window_size = 30  # 30天的滚动窗口
-target_size = 3  # 预测未来5天的负荷
+window_size = 100  # 50天的滚动窗口
+target_size = 45  # 预测未来5天的负荷
 X, y = create_rolling_window_data(input_train_final2, window_size, target_size)
 print(X.shape)
 scaler_X = MinMaxScaler()
@@ -210,7 +210,7 @@ scaler_y = MinMaxScaler()
 X_flattened = X.reshape(X.shape[0], -1)
 X_normalized = scaler_X.fit_transform(X_flattened)
 y_normalized = scaler_y.fit_transform(y[:, -1].reshape(-1, 1))
-X_train, X_test, y_train, y_test = train_test_split(X_normalized, y_normalized, test_size=0.145, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X_normalized, y_normalized, test_size=0.15, random_state=42)
 X_train_tensor = torch.FloatTensor(X_train)
 y_train_tensor = torch.FloatTensor(y_train)
 X_test_tensor = torch.FloatTensor(X_test)
@@ -242,6 +242,11 @@ criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 # 训练模型
 epochs = 50
+best_train_loss = float('inf')
+best_model_params = None
+print_every = 5
+
+# 训练循环
 for epoch in range(epochs):
     model.train()
     for inputs, labels in train_loader:
@@ -251,6 +256,26 @@ for epoch in range(epochs):
         loss.backward()
         optimizer.step()
 
+    # 使用训练集计算损失
+    with torch.no_grad():
+        model.eval()
+        train_outputs = model(X_train_tensor)
+        train_loss = criterion(train_outputs.squeeze(), y_train_tensor)
+
+        # 如果当前训练损失低于先前最低值，则保存模型参数
+        if train_loss < best_train_loss:
+            best_train_loss = train_loss
+            best_model_params = model.state_dict()
+
+    # 每5个epoch打印一次训练损失
+    if (epoch + 1) % print_every == 0:
+        print(f'Epoch [{epoch + 1}/{epochs}], Train Loss: {train_loss.item()}')
+
+# 在训练结束后，你可能还想打印最终的训练损失
+print(f'Final Train Loss: {best_train_loss.item()}')
+
+# 使用最佳模型参数加载模型
+model.load_state_dict(best_model_params)
 # 在测试集上评估模型
 with torch.no_grad():
     model.eval()
@@ -260,15 +285,17 @@ with torch.no_grad():
     # 进行逆标准化
     test_outputs_unscaled = scaler_y.inverse_transform(test_outputs.numpy().reshape(-1, target_size))
     y_test_unscaled = scaler_y.inverse_transform(y_test_tensor.numpy())
-
+    y_test_unscaled = torch.tensor(y_test_unscaled)
+    test_outputs_unscaled = torch.tensor(test_outputs_unscaled)
     # 打印评估指标
-    mae = nn.L1Loss()(test_outputs.squeeze(), y_test_tensor)
-    mape = torch.mean(torch.abs((y_test_tensor - test_outputs.squeeze()) / y_test_tensor)) * 100
+    mae = nn.L1Loss()(test_outputs_unscaled.squeeze(), y_test_unscaled)
+    mape = torch.mean(torch.abs((y_test_unscaled - test_outputs_unscaled.squeeze()) / y_test_unscaled)) * 100
     rmse = torch.sqrt(test_loss)
-    re = mae / torch.mean(y_test_tensor)
+    re = mae / torch.mean(y_test_unscaled)
 
     print(f'Mean Squared Error on Test Set: {test_loss.item()}')
     print(f'Mean Absolute Error on Test Set: {mae.item()}')
+    print(f'Mean Absolute Percentage Error on Test Set: {mape.item()}%')
     print(f'Root Mean Squared Error on Test Set: {rmse.item()}')
     print(f'Relative Error on Test Set: {re.item()}')
 
@@ -286,5 +313,3 @@ with torch.no_grad():
     for i, mape_i in enumerate(mape_values):
         print(f'MAPE for interval {i + 1}: {mape_i}%')
 
-print("Zero values in predicted values:", torch.sum(test_outputs.squeeze() == 0).item())
-print("Zero values in true values:", torch.sum(y_test_tensor == 0).item())
